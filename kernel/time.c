@@ -335,8 +335,27 @@ mktime(const unsigned int year0, const unsigned int mon0,
 	  )*60 + min /* now have minutes */
 	)*60 + sec; /* finally seconds */
 }
-
 EXPORT_SYMBOL(mktime);
+
+time64_t
+mktime64(	const unsigned int year0, const unsigned int mon0,
+        	const unsigned int day, const unsigned int hour,
+        	const unsigned int min, const unsigned int sec)
+{
+    unsigned int mon = mon0, year = year0;
+
+    if (0 >= (int) (mon -= 2)) {
+        mon += 12;
+        year -= 1;
+    }
+    return ((((s64)
+              (year/4 - year/100 + year/400 + 367*mon/12 + day) +
+              year*365 - 719499
+        )*24 + hour
+      )*60 + min
+    )*60 + sec;
+}
+EXPORT_SYMBOL(mktime64);
 
 /**
  * set_normalized_timespec - set timespec sec and nsec parts and normalize
@@ -373,6 +392,23 @@ void set_normalized_timespec(struct timespec *ts, time_t sec, s64 nsec)
 	ts->tv_nsec = nsec;
 }
 EXPORT_SYMBOL(set_normalized_timespec);
+
+void set_normalized_timespec64(struct timespec64 *ts, time64_t sec, s64 nsec)
+{
+	while (nsec >= NSEC_PER_SEC) {
+		asm("" : "+rm"(nsec));
+		nsec -= NSEC_PER_SEC;
+		++sec;
+	}
+	while (nsec < 0) {
+		asm("" : "+rm"(nsec));
+		nsec += NSEC_PER_SEC;
+		--sec;
+	}
+	ts->tv_sec = sec;
+	ts->tv_nsec = nsec;
+}
+EXPORT_SYMBOL(set_normalized_timespec64);
 
 /**
  * ns_to_timespec - Convert nanoseconds to timespec
@@ -577,54 +613,65 @@ EXPORT_SYMBOL(jiffies_to_timeval);
  */
 clock_t jiffies_to_clock_t(long x)
 {
-#if (TICK_NSEC % (NSEC_PER_SEC / USER_HZ)) == 0
-# if HZ < USER_HZ
-	return x * (USER_HZ / HZ);
-# else
-	return x / (HZ / USER_HZ);
-# endif
-#else
-	return div_u64((u64)x * TICK_NSEC, NSEC_PER_SEC / USER_HZ);
-#endif
+	#if (TICK_NSEC % (NSEC_PER_SEC / USER_HZ)) == 0
+
+		# if HZ < USER_HZ
+			return x * (USER_HZ / HZ);
+		# else
+			return x / (HZ / USER_HZ);
+		# endif
+
+	#else
+		return div_u64((u64)x * TICK_NSEC, NSEC_PER_SEC / USER_HZ);
+		
+	#endif
 }
 EXPORT_SYMBOL(jiffies_to_clock_t);
 
 unsigned long clock_t_to_jiffies(unsigned long x)
 {
-#if (HZ % USER_HZ)==0
-	if (x >= ~0UL / (HZ / USER_HZ))
-		return ~0UL;
-	return x * (HZ / USER_HZ);
-#else
-	/* Don't worry about loss of precision here .. */
-	if (x >= ~0UL / HZ * USER_HZ)
-		return ~0UL;
+	#if (HZ % USER_HZ)==0
 
-	/* .. but do try to contain it here */
-	return div_u64((u64)x * HZ, USER_HZ);
-#endif
+		if (x >= ~0UL / (HZ / USER_HZ))
+			return ~0UL;
+
+		return x * (HZ / USER_HZ);
+
+	#else
+		/* Don't worry about loss of precision here .. */
+		if (x >= ~0UL / HZ * USER_HZ)
+			return ~0UL;
+
+		/* .. but do try to contain it here */
+		return div_u64((u64)x * HZ, USER_HZ);
+	#endif
 }
 EXPORT_SYMBOL(clock_t_to_jiffies);
 
 u64 jiffies_64_to_clock_t(u64 x)
 {
-#if (TICK_NSEC % (NSEC_PER_SEC / USER_HZ)) == 0
-# if HZ < USER_HZ
-	x = div_u64(x * USER_HZ, HZ);
-# elif HZ > USER_HZ
-	x = div_u64(x, HZ / USER_HZ);
-# else
-	/* Nothing to do */
-# endif
-#else
-	/*
-	 * There are better ways that don't overflow early,
-	 * but even this doesn't overflow in hundreds of years
-	 * in 64 bits, so..
-	 */
-	x = div_u64(x * TICK_NSEC, (NSEC_PER_SEC / USER_HZ));
-#endif
-	return x;
+	#if (TICK_NSEC % (NSEC_PER_SEC / USER_HZ)) == 0
+
+		# if HZ < USER_HZ
+			x = div_u64(x * USER_HZ, HZ);
+
+		# elif HZ > USER_HZ
+			x = div_u64(x, HZ / USER_HZ);
+			
+		# else
+			/* Nothing to do */
+		# endif
+		
+		#else
+			/*
+			* There are better ways that don't overflow early,
+			* but even this doesn't overflow in hundreds of years
+			* in 64 bits, so..
+			*/
+			x = div_u64(x * TICK_NSEC, (NSEC_PER_SEC / USER_HZ));
+
+	#endif
+		return x;
 }
 EXPORT_SYMBOL(jiffies_64_to_clock_t);
 
@@ -659,19 +706,22 @@ u64 nsec_to_clock_t(u64 x)
  */
 unsigned long nsecs_to_jiffies(u64 n)
 {
-#if (NSEC_PER_SEC % HZ) == 0
-	/* Common case, HZ = 100, 128, 200, 250, 256, 500, 512, 1000 etc. */
-	return div_u64(n, NSEC_PER_SEC / HZ);
-#elif (HZ % 512) == 0
-	/* overflow after 292 years if HZ = 1024 */
-	return div_u64(n * HZ / 512, NSEC_PER_SEC / 512);
-#else
-	/*
-	 * Generic case - optimized for cases where HZ is a multiple of 3.
-	 * overflow after 64.99 years, exact for HZ = 60, 72, 90, 120 etc.
-	 */
-	return div_u64(n * 9, (9ull * NSEC_PER_SEC + HZ / 2) / HZ);
-#endif
+	#if (NSEC_PER_SEC % HZ) == 0
+		/* Common case, HZ = 100, 128, 200, 250, 256, 500, 512, 1000 etc. */
+		return div_u64(n, NSEC_PER_SEC / HZ);
+
+	#elif (HZ % 512) == 0
+		/* overflow after 292 years if HZ = 1024 */
+		return div_u64(n * HZ / 512, NSEC_PER_SEC / 512);
+
+	#else
+		/*
+		* Generic case - optimized for cases where HZ is a multiple of 3.
+		* overflow after 64.99 years, exact for HZ = 60, 72, 90, 120 etc.
+		*/
+		return div_u64(n * 9, (9ull * NSEC_PER_SEC + HZ / 2) / HZ);
+
+	#endif
 }
 
 #if (BITS_PER_LONG < 64)
@@ -695,8 +745,8 @@ EXPORT_SYMBOL(jiffies);
  * Add two timespec values and do a safety check for overflow.
  * It's assumed that both values are valid (>= 0)
  */
-struct timespec timespec_add_safe(const struct timespec lhs,
-				  const struct timespec rhs)
+struct timespec timespec_add_safe(	const struct timespec lhs,
+				  					const struct timespec rhs)
 {
 	struct timespec res;
 
@@ -708,3 +758,18 @@ struct timespec timespec_add_safe(const struct timespec lhs,
 
 	return res;
 }
+
+struct timespec64 timespec64_add_safe	(const struct timespec64 lhs,
+				       					const struct timespec64 rhs)
+{
+	struct timespec64 res;
+
+	set_normalized_timespec64(&res, lhs.tv_sec + rhs.tv_sec,
+				   lhs.tv_nsec + rhs.tv_nsec);
+
+	if (res.tv_sec < lhs.tv_sec || res.tv_sec < rhs.tv_sec)
+		res.tv_sec = TIME64_MAX;
+
+	return res;
+}
+EXPORT_SYMBOL(timespec64_add_safe);
