@@ -12,6 +12,8 @@
 #ifndef _STRUCT_TIMESPEC
 	#define _STRUCT_TIMESPEC
 	
+	typedef s64 time64_t;
+
 	struct timespec
 	{
 		__kernel_time_t		tv_sec;			/* seconds */
